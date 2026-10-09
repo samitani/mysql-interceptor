@@ -6,6 +6,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-mysql-org/go-mysql v1.14.0
 	github.com/go-sql-driver/mysql v1.9.3
+	github.com/pingcap/tidb/pkg/parser v0.0.0-20260219190905-9b9281fa8d6d
 	golang.org/x/oauth2 v0.30.0
 	gopkg.in/lumberjack.v2 v2.0.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -19,7 +20,6 @@ require (
 	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/pingcap/errors v0.11.5-0.20250523034308-74f78ae071ee // indirect
 	github.com/pingcap/log v1.1.1-0.20241212030209-7e3ff8601a2a // indirect
-	github.com/pingcap/tidb/pkg/parser v0.0.0-20260219190905-9b9281fa8d6d // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect

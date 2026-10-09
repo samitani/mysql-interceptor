@@ -117,6 +117,14 @@ type BackendConfig struct {
 	User           string `yaml:"-"`
 	Password       string `yaml:"-"`
 	PasswordStage1 []byte `yaml:"-"`
+
+	// Collation is the collation name the outbound connection announces in
+	// its handshake (e.g. "utf8mb4_general_ci"). Not yaml-bound: it is set
+	// at runtime from the collation the client announced in the inbound
+	// handshake, so the backend session's character_set_* / collation_connection
+	// match what the client would get connecting directly. Empty means
+	// go-mysql's default (utf8mb4_0900_ai_ci).
+	Collation string `yaml:"-"`
 }
 
 // KeepAliveConfig controls TCP keep-alive on a backend connection. The

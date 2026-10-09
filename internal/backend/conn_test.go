@@ -66,3 +66,20 @@ func TestBackendDialer_DialRespectsTimeout(t *testing.T) {
 		t.Fatalf("dial took %v; timeout (150ms) was not honored", elapsed)
 	}
 }
+
+func TestCollationName(t *testing.T) {
+	cases := []struct {
+		id   uint8
+		want string
+	}{
+		{45, "utf8mb4_general_ci"},
+		{255, "utf8mb4_0900_ai_ci"},
+		{33, "utf8_general_ci"},
+		{0, ""},
+	}
+	for _, c := range cases {
+		if got := CollationName(c.id); got != c.want {
+			t.Errorf("CollationName(%d) = %q, want %q", c.id, got, c.want)
+		}
+	}
+}

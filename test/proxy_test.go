@@ -230,3 +230,31 @@ func TestProxyHashedPasswordUserE2E(t *testing.T) {
 		t.Error("expected access denied for wrong password, got nil")
 	}
 }
+
+// TestProxyPropagatesClientCollation verifies the backend session comes up
+// with the collation the client announced in its handshake, rather than
+// go-mysql's utf8mb4_0900_ai_ci default.
+func TestProxyPropagatesClientCollation(t *testing.T) {
+	addr, cleanup := startInProcessProxy(t)
+	defer cleanup()
+
+	for _, collation := range []string{"utf8mb4_general_ci", "utf8mb4_0900_ai_ci", "utf8mb4_unicode_ci"} {
+		t.Run(collation, func(t *testing.T) {
+			dsn := fmt.Sprintf("root:rootpass@tcp(%s)/test_db?timeout=10s&collation=%s", addr, collation)
+			db, err := sql.Open("mysql", dsn)
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			defer db.Close()
+			db.SetMaxOpenConns(1)
+
+			var charset, coll string
+			if err := db.QueryRow("SELECT @@character_set_connection, @@collation_connection").Scan(&charset, &coll); err != nil {
+				t.Fatalf("query via proxy: %v", err)
+			}
+			if charset != "utf8mb4" || coll != collation {
+				t.Errorf("backend session got %s/%s, want utf8mb4/%s", charset, coll, collation)
+			}
+		})
+	}
+}
