@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/client"
+	"github.com/pingcap/tidb/pkg/parser/charset"
 	"github.com/takaidohigasi/mysql-interceptor/internal/config"
 )
 
@@ -57,6 +58,18 @@ func ConnectWithTimeout(cfg config.BackendConfig, tlsCfg config.BackendSideTLSCo
 		})
 	}
 
+	// Announce the client's collation in the handshake so the backend
+	// session's character_set_* / collation_connection match a direct
+	// connection. Without this go-mysql defaults to utf8mb4_0900_ai_ci
+	// regardless of what the client asked for. A backend that lacks the
+	// collation fails the handshake, which surfaces as a normal connect error.
+	if cfg.Collation != "" {
+		collation := cfg.Collation
+		opts = append(opts, func(c *client.Conn) error {
+			return c.SetCollation(collation)
+		})
+	}
+
 	dialer := backendDialer(timeout, cfg.KeepAlive)
 	// network "" lets go-mysql pick tcp/unix from the address shape
 	// (getNetProto); keep-alive only applies to TCP and is a no-op for
@@ -68,6 +81,21 @@ func ConnectWithTimeout(cfg config.BackendConfig, tlsCfg config.BackendSideTLSCo
 	}
 
 	return conn, nil
+}
+
+// CollationName returns the collation name for the 1-byte collation id a
+// client sends in its handshake response. It returns "" for ids that are
+// 0 or unknown, in which case the caller should leave the collation unset
+// (go-mysql then uses its default).
+func CollationName(id uint8) string {
+	if id == 0 {
+		return ""
+	}
+	c, err := charset.GetCollationByID(int(id))
+	if err != nil || c == nil {
+		return ""
+	}
+	return c.Name
 }
 
 // backendDialer builds the net.Dialer used for the backend connection,

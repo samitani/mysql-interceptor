@@ -295,6 +295,15 @@ func (ps *ProxyServer) handleConnection(sessionID uint64, conn net.Conn) {
 	backendCfg.User = backendUser
 	backendCfg.Password = backendPass
 	backendCfg.PasswordStage1 = backendStage1
+	// Bring the backend session up with the collation the client announced
+	// in its handshake (it also fixes character_set_client/connection/results).
+	// Unknown ids fall back to go-mysql's default.
+	collationID := serverConn.Charset()
+	backendCfg.Collation = backend.CollationName(collationID)
+	if backendCfg.Collation == "" {
+		sessionLog.Warn("client handshake collation id is unknown; using the default backend collation",
+			"collation_id", collationID)
+	}
 	// If the client sent CONNECT_WITH_DB during the handshake,
 	// ProxyHandler.UseDB has already recorded it in handler.currentDB.
 	// Override the configured default so the backend connection comes up
