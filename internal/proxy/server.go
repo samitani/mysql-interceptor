@@ -335,7 +335,7 @@ func (ps *ProxyServer) handleConnection(sessionID uint64, conn net.Conn) {
 	// so per-user GRANTs apply consistently.
 	var shadowSession *replay.ShadowSession
 	if ps.shadowSender != nil {
-		ss, sErr := ps.shadowSender.StartSession(sessionID, backendConn.GetDB(), backendUser, backendPass, backendStage1)
+		ss, sErr := ps.shadowSender.StartSession(sessionID, backendConn.GetDB(), backendUser, backendPass, backendStage1, backendCfg.Collation)
 		if sErr != nil {
 			sessionLog.Warn("shadow session start failed; continuing without shadow for this session",
 				"err", sErr)
