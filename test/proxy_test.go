@@ -266,8 +266,36 @@ func TestProxyPropagatesClientCollation(t *testing.T) {
 	}
 }
 
+// Collation ids as the MySQL protocol carries them: one byte in the
+// handshake. The id <-> name mapping is listed in
+// information_schema.COLLATIONS (the ID column), e.g.
+//
+//	SELECT ID, COLLATION_NAME FROM information_schema.COLLATIONS
+//	WHERE COLLATION_NAME IN ('utf8mb4_general_ci', 'utf8mb4_0900_ai_ci');
+//
+// See https://dev.mysql.com/doc/refman/8.0/en/information-schema-collations-table.html
+const (
+	collationIDUTF8MB4GeneralCI = 45  // utf8mb4_general_ci
+	collationIDUTF8MB40900AICI  = 255 // utf8mb4_0900_ai_ci (go-mysql's and MySQL 8.0's default)
+)
+
 // greetingCollationID dials addr and returns the collation id from the
-// server's initial handshake packet (sent before authentication).
+// server's initial handshake packet. The server sends this packet first,
+// before the client authenticates, so no credentials are needed.
+//
+// Packet layout (Protocol::HandshakeV10), after the 4-byte packet header
+// (3-byte little-endian payload length + 1-byte sequence id):
+//
+//	1 byte    protocol version (10)
+//	NUL-term  server version string
+//	4 bytes   connection id
+//	8 bytes   auth-plugin-data-part-1
+//	1 byte    filler (0x00)
+//	2 bytes   capability flags (lower 2 bytes)
+//	1 byte    character set  <- the collation id this function returns
+//	...
+//
+// See https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_v10.html
 func greetingCollationID(t *testing.T, addr string) uint8 {
 	t.Helper()
 	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
@@ -276,6 +304,7 @@ func greetingCollationID(t *testing.T, addr string) uint8 {
 	}
 	defer c.Close()
 	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Packet header: 3-byte little-endian payload length, then the sequence id.
 	var hdr [4]byte
 	if _, err := io.ReadFull(c, hdr[:]); err != nil {
 		t.Fatalf("reading greeting header: %v", err)
@@ -284,9 +313,11 @@ func greetingCollationID(t *testing.T, addr string) uint8 {
 	if _, err := io.ReadFull(c, payload); err != nil {
 		t.Fatalf("reading greeting: %v", err)
 	}
-	// protocol(1) | version\0 | conn id(4) | auth data(8) | filler(1) | caps(2) | charset(1)
-	end := bytes.IndexByte(payload[1:], 0)
-	return payload[1+end+1+4+8+1+2]
+	// Skip protocol version (1), the NUL-terminated server version, connection
+	// id (4), auth-plugin-data-part-1 (8), filler (1) and capability flags (2).
+	versionLen := bytes.IndexByte(payload[1:], 0)
+	charsetPos := 1 + versionLen + 1 + 4 + 8 + 1 + 2
+	return payload[charsetPos]
 }
 
 // TestProxyDefaultCollationInGreeting verifies proxy.default_collation is
@@ -299,8 +330,8 @@ func TestProxyDefaultCollationInGreeting(t *testing.T) {
 		func(c *config.Config) { c.Proxy.DefaultCollation = "utf8mb4_general_ci" })
 	defer cleanup()
 
-	if got := greetingCollationID(t, addr); got != 45 {
-		t.Errorf("greeting collation id = %d, want 45 (utf8mb4_general_ci)", got)
+	if got := greetingCollationID(t, addr); got != collationIDUTF8MB4GeneralCI {
+		t.Errorf("greeting collation id = %d, want %d (utf8mb4_general_ci)", got, collationIDUTF8MB4GeneralCI)
 	}
 }
 
@@ -310,7 +341,7 @@ func TestProxyDefaultCollationUnset(t *testing.T) {
 	addr, cleanup := startInProcessProxy(t)
 	defer cleanup()
 
-	if got := greetingCollationID(t, addr); got != 255 {
-		t.Errorf("greeting collation id = %d, want 255 (utf8mb4_0900_ai_ci)", got)
+	if got := greetingCollationID(t, addr); got != collationIDUTF8MB40900AICI {
+		t.Errorf("greeting collation id = %d, want %d (utf8mb4_0900_ai_ci)", got, collationIDUTF8MB40900AICI)
 	}
 }
