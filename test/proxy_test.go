@@ -1,8 +1,10 @@
 package test
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -26,8 +28,9 @@ func startInProcessProxy(t *testing.T) (string, func()) {
 }
 
 // startInProcessProxyWithUsers is startInProcessProxy with an explicit
-// proxy.users list.
-func startInProcessProxyWithUsers(t *testing.T, users []config.UserConfig) (string, func()) {
+// proxy.users list. Optional mutators adjust the config before the proxy
+// is created.
+func startInProcessProxyWithUsers(t *testing.T, users []config.UserConfig, mutate ...func(*config.Config)) (string, func()) {
 	t.Helper()
 	skipIfNoMySQL(t)
 
@@ -51,6 +54,10 @@ func startInProcessProxyWithUsers(t *testing.T, users []config.UserConfig) (stri
 			Addr: backendAddr,
 			DB:   "test_db",
 		},
+	}
+
+	for _, m := range mutate {
+		m(cfg)
 	}
 
 	srv, err := proxy.NewProxyServer(cfg, nil, nil)
@@ -256,5 +263,54 @@ func TestProxyPropagatesClientCollation(t *testing.T) {
 				t.Errorf("backend session got %s/%s, want utf8mb4/%s", charset, coll, collation)
 			}
 		})
+	}
+}
+
+// greetingCollationID dials addr and returns the collation id from the
+// server's initial handshake packet (sent before authentication).
+func greetingCollationID(t *testing.T, addr string) uint8 {
+	t.Helper()
+	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	defer c.Close()
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var hdr [4]byte
+	if _, err := io.ReadFull(c, hdr[:]); err != nil {
+		t.Fatalf("reading greeting header: %v", err)
+	}
+	payload := make([]byte, int(hdr[0])|int(hdr[1])<<8|int(hdr[2])<<16)
+	if _, err := io.ReadFull(c, payload); err != nil {
+		t.Fatalf("reading greeting: %v", err)
+	}
+	// protocol(1) | version\0 | conn id(4) | auth data(8) | filler(1) | caps(2) | charset(1)
+	end := bytes.IndexByte(payload[1:], 0)
+	return payload[1+end+1+4+8+1+2]
+}
+
+// TestProxyDefaultCollationInGreeting verifies proxy.default_collation is
+// what the proxy advertises in its greeting, and that a client echoing it
+// (as PHP's mysqlnd does when it picks no charset) gets a backend session
+// with that collation.
+func TestProxyDefaultCollationInGreeting(t *testing.T) {
+	addr, cleanup := startInProcessProxyWithUsers(t,
+		[]config.UserConfig{{Username: "root", Password: "rootpass"}},
+		func(c *config.Config) { c.Proxy.DefaultCollation = "utf8mb4_general_ci" })
+	defer cleanup()
+
+	if got := greetingCollationID(t, addr); got != 45 {
+		t.Errorf("greeting collation id = %d, want 45 (utf8mb4_general_ci)", got)
+	}
+}
+
+// TestProxyDefaultCollationUnset keeps the historical greeting
+// (utf8mb4_0900_ai_ci, id 255) when proxy.default_collation is empty.
+func TestProxyDefaultCollationUnset(t *testing.T) {
+	addr, cleanup := startInProcessProxy(t)
+	defer cleanup()
+
+	if got := greetingCollationID(t, addr); got != 255 {
+		t.Errorf("greeting collation id = %d, want 255 (utf8mb4_0900_ai_ci)", got)
 	}
 }
