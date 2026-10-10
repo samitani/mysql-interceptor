@@ -2,12 +2,20 @@ package proxy
 
 import (
 	"log/slog"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/takaidohigasi/mysql-interceptor/internal/config"
 	"github.com/takaidohigasi/mysql-interceptor/internal/metrics"
 )
+
+// TestMain stubs the backend collation probe so NewProxyServer does not
+// need a reachable backend in unit tests.
+func TestMain(m *testing.M) {
+	probeBackendCollation = func(config.BackendConfig, time.Duration) (uint8, error) { return 45, nil }
+	os.Exit(m.Run())
+}
 
 // TestMaxConnectionsCapacity verifies that NewProxyServer sizes the
 // connection-slot semaphore from cfg.Proxy.MaxConnections, falling back

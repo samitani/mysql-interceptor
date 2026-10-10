@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"bytes"
+	"net"
 	"testing"
 	"time"
 
@@ -81,5 +83,67 @@ func TestCollationName(t *testing.T) {
 		if got := CollationName(c.id); got != c.want {
 			t.Errorf("CollationName(%d) = %q, want %q", c.id, got, c.want)
 		}
+	}
+}
+
+// greeting builds a HandshakeV10 payload with the given version and charset.
+func greeting(version string, charsetID byte) []byte {
+	p := []byte{10}
+	p = append(p, version...)
+	p = append(p, 0)
+	p = append(p, 1, 0, 0, 0)             // connection id
+	p = append(p, 1, 2, 3, 4, 5, 6, 7, 8) // auth-plugin-data-part-1
+	p = append(p, 0)                      // filler
+	p = append(p, 0xff, 0xf7)             // capability lower
+	p = append(p, charsetID)
+	p = append(p, 2, 0) // status
+	return p
+}
+
+func frame(payload []byte) []byte {
+	return append([]byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), 0}, payload...)
+}
+
+func TestReadGreetingCollation(t *testing.T) {
+	got, err := readGreetingCollation(bytes.NewReader(frame(greeting("8.0.43", 45))))
+	if err != nil || got != 45 {
+		t.Fatalf("got (%d, %v), want (45, nil)", got, err)
+	}
+
+	errPkt := frame(append([]byte{0xff, 0x10, 0x04, '#', 'H', 'Y', '0', '0', '0'}, "Too many connections"...))
+	if _, err := readGreetingCollation(bytes.NewReader(errPkt)); err == nil {
+		t.Error("expected an error for an ERR packet")
+	}
+	if _, err := readGreetingCollation(bytes.NewReader(frame(greeting("8.0.43", 45)[:12]))); err == nil {
+		t.Error("expected an error for a truncated greeting")
+	}
+	if _, err := readGreetingCollation(bytes.NewReader(nil)); err == nil {
+		t.Error("expected an error for an empty stream")
+	}
+}
+
+func TestProbeCollation(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = c.Write(frame(greeting("8.0.43", 45)))
+	}()
+
+	got, err := ProbeCollation(config.BackendConfig{Addr: ln.Addr().String()}, 2*time.Second)
+	if err != nil || got != 45 {
+		t.Fatalf("got (%d, %v), want (45, nil)", got, err)
+	}
+
+	ln.Close()
+	if _, err := ProbeCollation(config.BackendConfig{Addr: ln.Addr().String()}, time.Second); err == nil {
+		t.Error("expected an error when the backend is unreachable")
 	}
 }

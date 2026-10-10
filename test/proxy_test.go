@@ -10,6 +10,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/takaidohigasi/mysql-interceptor/internal/backend"
 	"github.com/takaidohigasi/mysql-interceptor/internal/config"
 	"github.com/takaidohigasi/mysql-interceptor/internal/proxy"
 )
@@ -256,5 +257,26 @@ func TestProxyPropagatesClientCollation(t *testing.T) {
 				t.Errorf("backend session got %s/%s, want utf8mb4/%s", charset, coll, collation)
 			}
 		})
+	}
+}
+
+// TestProxyAdvertisesBackendCollation verifies the greeting the proxy sends
+// to its clients carries the backend's default collation, so clients that
+// pick no charset themselves (e.g. PHP's mysqlnd) match a direct connection.
+func TestProxyAdvertisesBackendCollation(t *testing.T) {
+	addr, cleanup := startInProcessProxy(t)
+	defer cleanup()
+
+	backendAddr := getEnvOrDefault("MYSQL1_ADDR", "127.0.0.1:3306")
+	want, err := backend.ProbeCollation(config.BackendConfig{Addr: backendAddr}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("probing backend: %v", err)
+	}
+	got, err := backend.ProbeCollation(config.BackendConfig{Addr: addr}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("probing proxy: %v", err)
+	}
+	if got != want {
+		t.Errorf("proxy greeting collation id = %d, want the backend's %d", got, want)
 	}
 }

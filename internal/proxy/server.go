@@ -2,11 +2,16 @@ package proxy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
+	"math/big"
+	mrand "math/rand/v2"
 	"net"
 	"os"
 	"sync"
@@ -62,6 +67,9 @@ type ProxyServer struct {
 	cancel       context.CancelFunc
 }
 
+// probeBackendCollation is a variable so unit tests can run without a backend.
+var probeBackendCollation = backend.ProbeCollation
+
 func NewProxyServer(cfg *config.Config, logger *logging.Logger, shadowSender *replay.ShadowSender) (*ProxyServer, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -80,17 +88,29 @@ func NewProxyServer(cfg *config.Config, logger *logging.Logger, shadowSender *re
 		cancel:       cancel,
 	}
 
-	var svr *server.Server
-	if cfg.TLS.ClientSide.Enabled {
-		tc, err := buildClientSideTLSConfig(cfg.TLS.ClientSide)
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("building client-side TLS config: %w", err)
-		}
-		svr = server.NewServer("8.0.30", mysql.DEFAULT_COLLATION_ID, mysql.AUTH_NATIVE_PASSWORD, nil, tc)
-	} else {
-		svr = server.NewDefaultServer()
+	// The greeting's collation is what clients that pick no charset of their
+	// own (e.g. PHP's mysqlnd) echo back in their handshake. Advertise the
+	// backend's default so they come up the same as on a direct connection.
+	// A backend that cannot be probed is a startup error.
+	collationID, err := probeBackendCollation(cfg.Backend, backend.DefaultConnectTimeout)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("reading the backend's default collation: %w", err)
 	}
+	slog.Info("advertising the backend's default collation to clients",
+		"collation_id", collationID, "collation", backend.CollationName(collationID))
+
+	var tc *tls.Config
+	if cfg.TLS.ClientSide.Enabled {
+		tc, err = buildClientSideTLSConfig(cfg.TLS.ClientSide)
+	} else {
+		tc, err = buildSelfSignedTLSConfig()
+	}
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("building client-side TLS config: %w", err)
+	}
+	svr := server.NewServer("8.0.30", collationID, mysql.AUTH_NATIVE_PASSWORD, nil, tc)
 
 	ps.serverConf = svr
 	ps.maxSessionLifetime.Store(int64(cfg.Proxy.MaxSessionLifetime))
@@ -371,7 +391,7 @@ func (ps *ProxyServer) handleConnection(sessionID uint64, conn net.Conn) {
 	// takes effect on the next loop turn for existing sessions; the jitter
 	// factor stays fixed so a session can't oscillate around the deadline.
 	sessionStart := time.Now()
-	jitterFactor := 1.0 + (rand.Float64()*0.2 - 0.1) // [-10%, +10%]
+	jitterFactor := 1.0 + (mrand.Float64()*0.2 - 0.1) // [-10%, +10%]
 
 	for {
 		if err := serverConn.HandleCommand(); err != nil {
@@ -463,6 +483,32 @@ func redact(args []interface{}) []interface{} {
 		out[i] = "<redacted>"
 	}
 	return out
+}
+
+// buildSelfSignedTLSConfig returns an in-memory self-signed server config so
+// the proxy keeps advertising CLIENT_SSL to clients when no client-side TLS
+// certificate is configured (as go-mysql's default server does).
+func buildSelfSignedTLSConfig() (*tls.Config, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "mysql-interceptor"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+	}, nil
 }
 
 func buildClientSideTLSConfig(cfg config.ClientSideTLSConfig) (*tls.Config, error) {
