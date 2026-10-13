@@ -697,7 +697,7 @@ func TestStartSession_SlowConnectDoesNotBlock(t *testing.T) {
 	}
 
 	start := time.Now()
-	ss, err := s.StartSession(1, "appdb", "", "", nil)
+	ss, err := s.StartSession(1, "appdb", "", "", nil, "")
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("StartSession returned error: %v", err)
@@ -744,7 +744,7 @@ func TestStartSession_ConnectFailureStopsShadow(t *testing.T) {
 		return nil, errors.New("connection refused")
 	}
 
-	ss, err := s.StartSession(7, "", "", "", nil)
+	ss, err := s.StartSession(7, "", "", "", nil, "")
 	if err != nil || ss == nil {
 		t.Fatalf("StartSession: ss=%v err=%v", ss, err)
 	}
@@ -793,7 +793,7 @@ func TestStartSession_PropagatesCredentials(t *testing.T) {
 				return nil, errors.New("connect intentionally refused")
 			}
 
-			ss, err := s.StartSession(3, "appdb", tc.user, tc.password, tc.stage1)
+			ss, err := s.StartSession(3, "appdb", tc.user, tc.password, tc.stage1, "")
 			if err != nil {
 				t.Fatalf("StartSession: %v", err)
 			}
@@ -817,5 +817,37 @@ func TestStartSession_PropagatesCredentials(t *testing.T) {
 				t.Fatal("connect was not invoked")
 			}
 		})
+	}
+}
+
+// TestStartSession_PassesCollation verifies the collation the primary
+// session was opened with reaches both the shadow connection and the
+// primary verification connection config (comparison.retry mode "both").
+func TestStartSession_PassesCollation(t *testing.T) {
+	s := newConnectTestSender(t)
+	s.retryMode = "both"
+	s.primaryBackend = &config.BackendConfig{Addr: "203.0.113.2:3306"}
+	got := make(chan config.BackendConfig, 1)
+	s.connect = func(cfg config.BackendConfig, _ config.BackendSideTLSConfig) (*client.Conn, error) {
+		got <- cfg
+		return nil, errors.New("connect intentionally refused")
+	}
+
+	ss, err := s.StartSession(5, "appdb", "alice", "pw", nil, "utf8mb4_general_ci")
+	if err != nil || ss == nil {
+		t.Fatalf("StartSession: ss=%v err=%v", ss, err)
+	}
+	defer ss.Close()
+
+	select {
+	case cfg := <-got:
+		if cfg.Collation != "utf8mb4_general_ci" {
+			t.Errorf("shadow connection Collation = %q, want utf8mb4_general_ci", cfg.Collation)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("connect was not invoked")
+	}
+	if ss.primaryCfg == nil || ss.primaryCfg.Collation != "utf8mb4_general_ci" {
+		t.Errorf("primary verification config = %+v, want Collation utf8mb4_general_ci", ss.primaryCfg)
 	}
 }

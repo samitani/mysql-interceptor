@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/pingcap/tidb/pkg/parser/charset"
 	"gopkg.in/yaml.v3"
 )
 
@@ -60,6 +62,31 @@ type ProxyConfig struct {
 	// reports SERVER_STATUS_IN_TRANS = false. 0 (the default) disables
 	// the cap entirely. Hot-reloadable.
 	MaxSessionLifetime time.Duration `yaml:"max_session_lifetime,omitempty"`
+	// DefaultCollation is the collation the proxy advertises in its
+	// greeting to clients (e.g. "utf8mb4_general_ci"). Clients that pick no
+	// charset of their own (such as PHP's mysqlnd) echo it back in their
+	// handshake, so set it to the backend's default collation to make them
+	// behave as on a direct connection. Empty keeps utf8mb4_0900_ai_ci.
+	// Not hot-reloadable: it is read at startup.
+	DefaultCollation string `yaml:"default_collation,omitempty"`
+}
+
+// DefaultCollationID returns the 1-byte collation id for DefaultCollation,
+// or mysql.DEFAULT_COLLATION_ID (utf8mb4_0900_ai_ci) when it is empty. The
+// handshake carries a single byte, so collations with an id above 255 are
+// rejected.
+func (p ProxyConfig) DefaultCollationID() (uint8, error) {
+	if p.DefaultCollation == "" {
+		return mysql.DEFAULT_COLLATION_ID, nil
+	}
+	c, err := charset.GetCollationByName(p.DefaultCollation)
+	if err != nil {
+		return 0, fmt.Errorf("proxy.default_collation %q: %w", p.DefaultCollation, err)
+	}
+	if c.ID <= 0 || c.ID > 255 {
+		return 0, fmt.Errorf("proxy.default_collation %q has id %d, which does not fit the handshake's 1-byte collation id", p.DefaultCollation, c.ID)
+	}
+	return uint8(c.ID), nil
 }
 
 // UserConfig describes one user the proxy will accept. Exactly one of
@@ -117,6 +144,14 @@ type BackendConfig struct {
 	User           string `yaml:"-"`
 	Password       string `yaml:"-"`
 	PasswordStage1 []byte `yaml:"-"`
+
+	// Collation is the collation name the outbound connection announces in
+	// its handshake (e.g. "utf8mb4_general_ci"). Not yaml-bound: it is set
+	// at runtime from the collation the client announced in the inbound
+	// handshake, so the backend session's character_set_* / collation_connection
+	// match what the client would get connecting directly. Empty means
+	// go-mysql's default (utf8mb4_0900_ai_ci).
+	Collation string `yaml:"-"`
 }
 
 // KeepAliveConfig controls TCP keep-alive on a backend connection. The
@@ -623,6 +658,9 @@ func defaultKeepAlive(ka *KeepAliveConfig) {
 func (c *Config) Validate() error {
 	if c.Backend.Addr == "" {
 		return fmt.Errorf("backend.addr is required")
+	}
+	if _, err := c.Proxy.DefaultCollationID(); err != nil {
+		return err
 	}
 	// proxy.users is the only way to authenticate clients. The proxy
 	// always opens its outbound backend connection using the inbound

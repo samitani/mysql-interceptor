@@ -340,7 +340,12 @@ func (s *ShadowSender) SetPrimaryBackend(cfg config.BackendConfig, tlsCfg config
 // hashed_password users it is "" and stage1 carries the mysql_native_password
 // SHA1(plaintext) recovered from the inbound handshake instead (see
 // config.BackendConfig.PasswordStage1).
-func (s *ShadowSender) StartSession(sessionID uint64, initialDB, user, password string, stage1 []byte) (*ShadowSession, error) {
+//
+// collation, when non-empty, is the collation name the primary session was
+// opened with. The shadow connection (and the primary verification
+// connection used by comparison.retry mode "both") announces it too, so
+// collation-sensitive queries behave the same on both sides.
+func (s *ShadowSender) StartSession(sessionID uint64, initialDB, user, password string, stage1 []byte, collation string) (*ShadowSession, error) {
 	if s.closed.Load() {
 		return nil, fmt.Errorf("shadow sender is closed")
 	}
@@ -349,6 +354,7 @@ func (s *ShadowSender) StartSession(sessionID uint64, initialDB, user, password 
 	}
 
 	backendCfg := s.backendCfg
+	backendCfg.Collation = collation
 	if user != "" {
 		backendCfg.User = user
 		backendCfg.Password = password
@@ -368,6 +374,7 @@ func (s *ShadowSender) StartSession(sessionID uint64, initialDB, user, password 
 	}
 	if s.retryMode == "both" && s.primaryBackend != nil {
 		pcfg := *s.primaryBackend
+		pcfg.Collation = collation
 		if user != "" {
 			pcfg.User = user
 			pcfg.Password = password

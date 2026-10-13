@@ -2,11 +2,16 @@ package proxy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
+	"math/big"
+	mrand "math/rand/v2"
 	"net"
 	"os"
 	"sync"
@@ -80,17 +85,23 @@ func NewProxyServer(cfg *config.Config, logger *logging.Logger, shadowSender *re
 		cancel:       cancel,
 	}
 
-	var svr *server.Server
-	if cfg.TLS.ClientSide.Enabled {
-		tc, err := buildClientSideTLSConfig(cfg.TLS.ClientSide)
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("building client-side TLS config: %w", err)
-		}
-		svr = server.NewServer("8.0.30", mysql.DEFAULT_COLLATION_ID, mysql.AUTH_NATIVE_PASSWORD, nil, tc)
-	} else {
-		svr = server.NewDefaultServer()
+	collationID, err := cfg.Proxy.DefaultCollationID()
+	if err != nil {
+		cancel()
+		return nil, err
 	}
+
+	var tc *tls.Config
+	if cfg.TLS.ClientSide.Enabled {
+		tc, err = buildClientSideTLSConfig(cfg.TLS.ClientSide)
+	} else {
+		tc, err = buildSelfSignedTLSConfig()
+	}
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("building client-side TLS config: %w", err)
+	}
+	svr := server.NewServer("8.0.30", collationID, mysql.AUTH_NATIVE_PASSWORD, nil, tc)
 
 	ps.serverConf = svr
 	ps.maxSessionLifetime.Store(int64(cfg.Proxy.MaxSessionLifetime))
@@ -295,6 +306,15 @@ func (ps *ProxyServer) handleConnection(sessionID uint64, conn net.Conn) {
 	backendCfg.User = backendUser
 	backendCfg.Password = backendPass
 	backendCfg.PasswordStage1 = backendStage1
+	// Bring the backend session up with the collation the client announced
+	// in its handshake (it also fixes character_set_client/connection/results).
+	// Unknown ids fall back to go-mysql's default.
+	collationID := serverConn.Charset()
+	backendCfg.Collation = backend.CollationName(collationID)
+	if backendCfg.Collation == "" {
+		sessionLog.Warn("client handshake collation id is unknown; using the default backend collation",
+			"collation_id", collationID)
+	}
 	// If the client sent CONNECT_WITH_DB during the handshake,
 	// ProxyHandler.UseDB has already recorded it in handler.currentDB.
 	// Override the configured default so the backend connection comes up
@@ -315,7 +335,7 @@ func (ps *ProxyServer) handleConnection(sessionID uint64, conn net.Conn) {
 	// so per-user GRANTs apply consistently.
 	var shadowSession *replay.ShadowSession
 	if ps.shadowSender != nil {
-		ss, sErr := ps.shadowSender.StartSession(sessionID, backendConn.GetDB(), backendUser, backendPass, backendStage1)
+		ss, sErr := ps.shadowSender.StartSession(sessionID, backendConn.GetDB(), backendUser, backendPass, backendStage1, backendCfg.Collation)
 		if sErr != nil {
 			sessionLog.Warn("shadow session start failed; continuing without shadow for this session",
 				"err", sErr)
@@ -362,7 +382,7 @@ func (ps *ProxyServer) handleConnection(sessionID uint64, conn net.Conn) {
 	// takes effect on the next loop turn for existing sessions; the jitter
 	// factor stays fixed so a session can't oscillate around the deadline.
 	sessionStart := time.Now()
-	jitterFactor := 1.0 + (rand.Float64()*0.2 - 0.1) // [-10%, +10%]
+	jitterFactor := 1.0 + (mrand.Float64()*0.2 - 0.1) // [-10%, +10%]
 
 	for {
 		if err := serverConn.HandleCommand(); err != nil {
@@ -454,6 +474,32 @@ func redact(args []interface{}) []interface{} {
 		out[i] = "<redacted>"
 	}
 	return out
+}
+
+// buildSelfSignedTLSConfig returns an in-memory self-signed server config so
+// the proxy keeps advertising CLIENT_SSL to clients when no client-side TLS
+// certificate is configured (as go-mysql's default server does).
+func buildSelfSignedTLSConfig() (*tls.Config, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "mysql-interceptor"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+	}, nil
 }
 
 func buildClientSideTLSConfig(cfg config.ClientSideTLSConfig) (*tls.Config, error) {

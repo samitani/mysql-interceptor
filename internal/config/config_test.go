@@ -663,3 +663,45 @@ comparison:
 		}
 	}
 }
+
+func TestProxyDefaultCollationID(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    uint8
+		wantErr bool
+	}{
+		{"empty keeps utf8mb4_0900_ai_ci", "", 255, false},
+		{"utf8mb4_general_ci", "utf8mb4_general_ci", 45, false},
+		{"case-insensitive", "UTF8MB4_General_CI", 45, false},
+		{"unknown name", "no_such_collation", 0, true},
+		{"id above 255 does not fit the handshake", "utf8mb4_zh_0900_as_cs", 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := ProxyConfig{DefaultCollation: c.in}.DefaultCollationID()
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
+			}
+			if err == nil && got != c.want {
+				t.Errorf("id = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+func TestLoad_InvalidDefaultCollation(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	os.WriteFile(cfgPath, []byte(`
+proxy:
+  users:
+    - username: "u"
+      password: "p"
+  default_collation: "no_such_collation"
+backend:
+  addr: "127.0.0.1:3306"
+`), 0o644)
+	if _, err := Load(cfgPath); err == nil {
+		t.Error("expected validation error for an unknown proxy.default_collation")
+	}
+}

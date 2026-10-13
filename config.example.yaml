@@ -40,6 +40,13 @@ proxy:
   # commands, only when the backend is not in a transaction). 0 disables.
   # Hot-reloadable.
   # max_session_lifetime: 1h
+  # Collation advertised in the greeting to clients. Clients that pick no
+  # charset of their own (e.g. PHP's mysqlnd) echo it back in their
+  # handshake, so set it to the backend's default collation to make them
+  # behave as on a direct connection. The backend session is opened with
+  # the collation the client announced. Default: utf8mb4_0900_ai_ci.
+  # Not hot-reloadable.
+  # default_collation: "utf8mb4_general_ci"
 
 backend:
   addr: "127.0.0.1:3306"
