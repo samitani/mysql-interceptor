@@ -7,6 +7,50 @@ and the project adheres to [Semantic Versioning](https://semver.org/) once it
 reaches 1.0 (everything before is 0.y.z with breaking changes possible between
 minor versions).
 
+<a id="v0.0.19"></a>
+## v0.0.19
+
+_Released 2026-10-13._
+
+The proxy carries the client's collation to the primary and shadow
+connections, and the collation it advertises in its greeting can be set.
+The query log records only failing queries by default.
+
+**Upgrade notes**
+
+- `logging.level` now defaults to **`error`**. Set `level: "all"` to keep
+  logging every query.
+- Backend and shadow sessions are opened with the collation the client
+  announced instead of always `utf8mb4_0900_ai_ci`. A backend that does
+  not know that collation fails the connection.
+
+### Added
+
+- **`proxy.default_collation`** (`internal/config/config.go`,
+  `internal/proxy/server.go`). The collation the proxy advertises in its
+  greeting (default `utf8mb4_0900_ai_ci`, unchanged). Clients that pick no
+  charset of their own, such as PHP's mysqlnd, echo it back in their
+  handshake, so set it to the primary's `collation_server` to get the same
+  `collation_connection` as on a direct connection. Read at startup (not
+  hot-reloadable); an unknown name or a collation id above 255 fails at
+  startup. (#55)
+
+### Changed
+
+- **The backend connection uses the client's handshake collation**
+  (`internal/backend/conn.go`, `internal/proxy/server.go`,
+  `internal/replay/shadow.go`). The primary connection, the shadow
+  connection and the `comparison.retry` mode `both` verification
+  connection are opened with the collation id the client sent, so
+  `character_set_*` and `collation_connection` match a direct connection
+  and collation-sensitive queries behave the same on both targets. An id
+  that is unknown falls back to the go-mysql default with a warning.
+  Clients that run `SET NAMES ... COLLATE ...` were not affected and are
+  unchanged. (#55)
+- **`logging.level` defaults to `error`** (`internal/config/config.go`).
+  Turning on `logging.enabled` no longer records every query by default;
+  switch to `all` (hot-reloadable) when investigating. (#54)
+
 <a id="v0.0.18"></a>
 ## v0.0.18
 
