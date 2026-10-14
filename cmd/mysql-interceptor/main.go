@@ -8,7 +8,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/takaidohigasi/mysql-interceptor/internal/bench"
 	"github.com/takaidohigasi/mysql-interceptor/internal/config"
@@ -113,8 +115,9 @@ func runServe() {
 	}
 
 	var queryLogger *logging.Logger
+	var logShipper *upload.Shipper
 	if cfg.Logging.OutputDir != "" {
-		queryLogger, err = logging.NewLogger(logging.LoggerConfig{
+		logCfg := logging.LoggerConfig{
 			Enabled:    cfg.Logging.Enabled,
 			Level:      cfg.Logging.Level,
 			OutputDir:  cfg.Logging.OutputDir,
@@ -124,7 +127,20 @@ func runServe() {
 			MaxAgeDays: cfg.Logging.Rotation.MaxAgeDays,
 			MaxBackups: cfg.Logging.Rotation.MaxBackups,
 			Compress:   cfg.Logging.Rotation.Compress,
-		})
+
+			RotateHourly:  cfg.Logging.Rotation.RotateHourly(),
+			RotateMinSize: int64(cfg.Logging.Rotation.MinSizeKB) * 1024,
+		}
+		if logCfg.RotateHourly {
+			uploader, err := gcsUploader(cfg.Logging.Upload)
+			if err != nil {
+				fatal("query log upload: no instance name", "err", err)
+			}
+			logShipper = upload.NewShipper(logCfg.Path(), "query log", uploader, cfg.Logging.Rotation.Keep, cfg.Logging.Upload.Timeout)
+			logShipper.Start()
+			logCfg.OnSegment = logShipper.Notify
+		}
+		queryLogger, err = logging.NewLogger(logCfg)
 		if err != nil {
 			fatal("failed to create query logger", "err", err)
 		}
@@ -135,11 +151,11 @@ func runServe() {
 	if cfg.Replay.Mode == "shadow" {
 		var opts replay.ShadowOptions
 		if cfg.Comparison.Rotation.RotateHourly() && cfg.Comparison.OutputFile != "" && cfg.Comparison.OutputFile != "-" {
-			uploader, err := reportUploader(cfg.Comparison)
+			uploader, err := gcsUploader(cfg.Comparison.Upload)
 			if err != nil {
 				fatal("report upload: no instance name", "err", err)
 			}
-			reportShipper = upload.NewShipper(cfg.Comparison.OutputFile, uploader, cfg.Comparison.Rotation.Keep, cfg.Comparison.Upload.Timeout)
+			reportShipper = upload.NewShipper(cfg.Comparison.OutputFile, "report", uploader, cfg.Comparison.Rotation.Keep, cfg.Comparison.Upload.Timeout)
 			reportShipper.Start()
 			opts.OnReportSegment = reportShipper.Notify
 		}
@@ -222,32 +238,54 @@ func runServe() {
 	// (or, previously, panic on send-to-closed-channel).
 	srv.Shutdown()
 	if shadowSender != nil {
+		// Closes the reporter, so the report is flushed and, with
+		// rotation, its last segment is queued on the shipper.
 		shadowSender.Close()
-		// The reporter is closed (and the report flushed) by
-		// shadowSender.Close, so the file is complete now. With rotation
-		// its last segment is already queued on the shipper.
-		if reportShipper != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), cfg.Comparison.Upload.Timeout)
-			reportShipper.Close(ctx)
-			cancel()
-		} else {
-			uploadReport(cfg.Comparison)
-		}
 	}
 	if queryLogger != nil {
+		// Same for the query log's last segment.
 		queryLogger.Close()
 	}
+	// The two uploads run side by side so the shutdown budget is
+	// shutdown_timeout plus the larger of the two upload timeouts.
+	var uploads sync.WaitGroup
+	if shadowSender != nil {
+		uploads.Add(1)
+		go func() {
+			defer uploads.Done()
+			if reportShipper != nil {
+				closeShipper(reportShipper, cfg.Comparison.Upload.Timeout)
+			} else {
+				uploadReport(cfg.Comparison)
+			}
+		}()
+	}
+	if logShipper != nil {
+		uploads.Add(1)
+		go func() {
+			defer uploads.Done()
+			closeShipper(logShipper, cfg.Logging.Upload.Timeout)
+		}()
+	}
+	uploads.Wait()
 
 	if serveErr != nil {
 		fatal("serve error", "err", serveErr)
 	}
 }
 
-// reportUploader returns the GCS uploader for the comparison report, or
-// nil when comparison.upload.gcs.bucket is not set. The instance name
-// defaults to the hostname (the pod name on Kubernetes).
-func reportUploader(cmp config.ComparisonConfig) (*upload.GCSUploader, error) {
-	gcs := cmp.Upload.GCS
+// closeShipper ships what s still has queued, giving up after timeout.
+func closeShipper(s *upload.Shipper, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	s.Close(ctx)
+}
+
+// gcsUploader returns the GCS uploader for up, or nil when gcs.bucket is
+// not set. The instance name defaults to the hostname (the pod name on
+// Kubernetes).
+func gcsUploader(up config.UploadConfig) (*upload.GCSUploader, error) {
+	gcs := up.GCS
 	if gcs.Bucket == "" {
 		return nil, nil
 	}
@@ -267,7 +305,7 @@ func reportUploader(cmp config.ComparisonConfig) (*upload.GCSUploader, error) {
 // latest copy. Failures are logged, not fatal: the proxy is already
 // shutting down and the local file is still there.
 func uploadReport(cmp config.ComparisonConfig) {
-	u, err := reportUploader(cmp)
+	u, err := gcsUploader(cmp.Upload)
 	if err != nil {
 		slog.Error("report upload skipped: no instance name", "err", err)
 		return

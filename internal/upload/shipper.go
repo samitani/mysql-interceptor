@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/takaidohigasi/mysql-interceptor/internal/compare"
 	"github.com/takaidohigasi/mysql-interceptor/internal/segment"
 )
 
@@ -18,8 +17,8 @@ import (
 // leftover pass.
 const shipperQueue = 16
 
-// Shipper handles the report data a rotating compare.Reporter settles
-// every hour (compare.SegmentEvent):
+// Shipper handles the data an hourly rotated file (the comparison report
+// or the query log) settles every hour (segment.Event):
 //
 //   - With an Uploader, each event is uploaded gzipped to
 //     Uploader.ObjectName(<file>, <start>) (one name per segment, so the
@@ -34,27 +33,30 @@ const shipperQueue = 16
 // are removed.
 type Shipper struct {
 	path     string
+	kind     string
 	uploader *GCSUploader
 	keep     int
 	timeout  time.Duration
 
-	events chan compare.SegmentEvent
+	events chan segment.Event
 	done   chan struct{}
 	ctx    context.Context
 	cancel context.CancelFunc
 	once   sync.Once
 }
 
-// NewShipper returns a Shipper for the report at path. uploader may be
-// nil; timeout bounds each upload. Call Start, then Close at shutdown.
-func NewShipper(path string, uploader *GCSUploader, keep int, timeout time.Duration) *Shipper {
+// NewShipper returns a Shipper for the rotated file at path. kind names
+// the file in log messages ("report", "query log"). uploader may be nil;
+// timeout bounds each upload. Call Start, then Close at shutdown.
+func NewShipper(path, kind string, uploader *GCSUploader, keep int, timeout time.Duration) *Shipper {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Shipper{
 		path:     path,
+		kind:     kind,
 		uploader: uploader,
 		keep:     keep,
 		timeout:  timeout,
-		events:   make(chan compare.SegmentEvent, shipperQueue),
+		events:   make(chan segment.Event, shipperQueue),
 		done:     make(chan struct{}),
 		ctx:      ctx,
 		cancel:   cancel,
@@ -74,13 +76,13 @@ func (s *Shipper) Start() {
 	}()
 }
 
-// Notify queues ev without blocking (it is called from the reporter's
-// writer goroutine).
-func (s *Shipper) Notify(ev compare.SegmentEvent) {
+// Notify queues ev without blocking (it is called from the writer
+// goroutine of the rotated file).
+func (s *Shipper) Notify(ev segment.Event) {
 	select {
 	case s.events <- ev:
 	default:
-		slog.Warn("report shipper is behind; dropping an event", "file", ev.Path, "closed", ev.Closed)
+		slog.Warn(s.kind+" shipper is behind; dropping an event", "file", ev.Path, "closed", ev.Closed)
 	}
 }
 
@@ -98,7 +100,7 @@ func (s *Shipper) Close(ctx context.Context) {
 	})
 }
 
-func (s *Shipper) handle(ev compare.SegmentEvent) {
+func (s *Shipper) handle(ev segment.Event) {
 	if ev.Closed {
 		// The start-up leftover pass may already have shipped it.
 		if _, err := os.Stat(ev.Path); os.IsNotExist(err) {
@@ -129,7 +131,7 @@ func (s *Shipper) retryLeftovers(skip string) {
 	}
 	segs, err := segment.List(s.path)
 	if err != nil {
-		slog.Error("listing report segments", "file", s.path, "err", err)
+		slog.Error("listing "+s.kind+" segments", "file", s.path, "err", err)
 		return
 	}
 	base := filepath.Base(s.path)
@@ -156,7 +158,7 @@ func (s *Shipper) prune() {
 	}
 	for _, seg := range segs[:len(segs)-s.keep] {
 		if s.uploader != nil {
-			slog.Warn("removing a report segment that was never uploaded", "segment", seg, "keep", s.keep)
+			slog.Warn("removing a "+s.kind+" segment that was never uploaded", "segment", seg, "keep", s.keep)
 		}
 		s.remove(seg)
 	}
@@ -166,15 +168,15 @@ func (s *Shipper) upload(localPath string, size int64, object string, gz bool) b
 	ctx, cancel := context.WithTimeout(s.ctx, s.timeout)
 	defer cancel()
 	if err := s.uploader.Upload(ctx, localPath, size, object, gz); err != nil {
-		slog.Error("report upload failed", "bucket", s.uploader.Bucket, "object", object, "file", localPath, "err", err)
+		slog.Error(s.kind+" upload failed", "bucket", s.uploader.Bucket, "object", object, "file", localPath, "err", err)
 		return false
 	}
-	slog.Info("report uploaded", "bucket", s.uploader.Bucket, "object", object, "bytes", size)
+	slog.Info(s.kind+" uploaded", "bucket", s.uploader.Bucket, "object", object, "bytes", size)
 	return true
 }
 
 func (s *Shipper) remove(p string) {
 	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-		slog.Error("removing report segment", "segment", p, "err", err)
+		slog.Error("removing "+s.kind+" segment", "segment", p, "err", err)
 	}
 }

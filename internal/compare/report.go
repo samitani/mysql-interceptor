@@ -184,7 +184,7 @@ func NewReporterFromOptions(opts ReporterOptions) (*Reporter, error) {
 	} else {
 		if rotate {
 			var err error
-			if leftover, err = adoptLeftover(opts.OutputFile); err != nil {
+			if leftover, err = segment.Adopt(opts.OutputFile); err != nil {
 				return nil, fmt.Errorf("rotating the previous report file: %w", err)
 			}
 		}
@@ -220,27 +220,6 @@ func NewReporterFromOptions(opts ReporterOptions) (*Reporter, error) {
 	}
 	go r.runWriter()
 	return r, nil
-}
-
-// adoptLeftover renames a non-empty report left at path by a previous
-// process to a segment named after its last modification, so this process
-// starts a fresh file and the old content is handled like any segment.
-func adoptLeftover(path string) (string, error) {
-	st, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	if st.Size() == 0 {
-		return "", nil
-	}
-	seg := segment.Name(path, st.ModTime())
-	if err := os.Rename(path, seg); err != nil {
-		return "", err
-	}
-	return seg, nil
 }
 
 func (r *Reporter) notify(ev SegmentEvent) {
@@ -321,18 +300,8 @@ func (r *Reporter) reopen() {
 }
 
 // SegmentEvent describes the report data a Rotate tick (or start-up /
-// Close) has settled: the first Size bytes of Path, which hold complete
-// records only (the writer flushed before measuring).
-type SegmentEvent struct {
-	// Path is the file to read: a closed segment when Closed, otherwise
-	// the live OutputFile, which keeps growing past Size.
-	Path string
-	Size int64
-	// Start is when the data began; it names the segment.
-	Start time.Time
-	// Closed is true once Path is a closed segment that will not change.
-	Closed bool
-}
+// Close) has settled. See segment.Event.
+type SegmentEvent = segment.Event
 
 type nopWriteCloser struct{ io.Writer }
 

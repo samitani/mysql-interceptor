@@ -705,3 +705,103 @@ backend:
 		t.Error("expected validation error for an unknown proxy.default_collation")
 	}
 }
+
+func TestLoad_LoggingRotationAndUpload(t *testing.T) {
+	base := `
+proxy:
+  users:
+    - username: "root"
+      password: "pass"
+backend:
+  addr: "127.0.0.1:3306"
+logging:
+`
+	load := func(t *testing.T, logging string) (*Config, error) {
+		t.Helper()
+		cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(base+logging), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return Load(cfgPath)
+	}
+
+	t.Run("defaults to size rotation", func(t *testing.T) {
+		cfg, err := load(t, `  output_dir: "/tmp/logs"
+`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := cfg.Logging.Rotation
+		if r.Interval != "size" || r.RotateHourly() || r.Keep != 24 || r.MaxSizeMB != 100 {
+			t.Errorf("rotation = %+v", r)
+		}
+		if cfg.Logging.Upload.Timeout != 20*time.Second || cfg.Logging.Upload.GCS.Bucket != "" {
+			t.Errorf("upload = %+v", cfg.Logging.Upload)
+		}
+	})
+
+	t.Run("hourly with upload", func(t *testing.T) {
+		cfg, err := load(t, `  output_dir: "/tmp/logs"
+  rotation:
+    interval: hourly
+    min_size_kb: 64
+    keep: 6
+  upload:
+    gcs:
+      bucket: "b"
+      prefix: "p"
+    timeout: 10s
+`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := cfg.Logging.Rotation
+		if !r.RotateHourly() || r.MinSizeKB != 64 || r.Keep != 6 {
+			t.Errorf("rotation = %+v", r)
+		}
+		if u := cfg.Logging.Upload; u.GCS.Bucket != "b" || u.GCS.Prefix != "p" || u.Timeout != 10*time.Second {
+			t.Errorf("upload = %+v", u)
+		}
+	})
+
+	for _, tc := range []struct {
+		name, logging, want string
+	}{
+		{"unknown interval", `  rotation:
+    interval: daily
+`, "logging.rotation.interval"},
+		{"negative min size", `  rotation:
+    interval: hourly
+    min_size_kb: -1
+`, "logging.rotation.min_size_kb"},
+		{"negative keep", `  rotation:
+    keep: -1
+`, "logging.rotation.keep"},
+		{"upload needs hourly rotation", `  output_dir: "/tmp/logs"
+  upload:
+    gcs:
+      bucket: "b"
+`, "logging.rotation.interval: hourly"},
+		{"upload needs output_dir", `  rotation:
+    interval: hourly
+  upload:
+    gcs:
+      bucket: "b"
+`, "logging.output_dir"},
+		{"negative upload timeout", `  output_dir: "/tmp/logs"
+  rotation:
+    interval: hourly
+  upload:
+    gcs:
+      bucket: "b"
+    timeout: -1s
+`, "logging.upload.timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := load(t, tc.logging)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("expected an error mentioning %q, got %v", tc.want, err)
+			}
+		})
+	}
+}

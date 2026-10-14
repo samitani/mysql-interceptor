@@ -84,10 +84,25 @@ logging:
   redact_args: false       # set true to replace prepared-stmt bind values with <redacted>
   queue_size: 10000        # async log buffer; overflow → logger_dropped counter
   rotation:
-    max_size_mb: 100
-    max_age_days: 7
-    max_backups: 5
-    compress: true
+    interval: size           # "size" (default, below) | "hourly": rotate
+                             # every UTC hour and ship like comparison.rotation
+    max_size_mb: 100         # size only
+    max_age_days: 7          # size only
+    max_backups: 5           # size only
+    compress: true           # size only
+    min_size_kb: 0           # hourly only: 0 = rotate every non-empty hour
+    keep: 24                 # hourly only: closed segments kept locally
+  # upload: hourly rotation only. Same layout as comparison.upload, with
+  # <file_prefix>.jsonl as the file name:
+  #   gs://<bucket>/<prefix>/<YYYYMMDDHH>/<instance>/queries.jsonl-<start>.gz
+  #   gs://<bucket>/latest/<prefix>/<instance>-queries.jsonl
+  # Leave bucket empty to disable.
+  upload:
+    gcs:
+      bucket: ""
+      prefix: "mysql-interceptor"
+      # instance: "${POD_NAME}"
+    timeout: 20s
 
 replay:
   mode: "disabled"    # "disabled" | "shadow" | "offline"

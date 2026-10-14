@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/takaidohigasi/mysql-interceptor/internal/compare"
 	"github.com/takaidohigasi/mysql-interceptor/internal/segment"
 )
 
@@ -83,12 +82,12 @@ var t9 = time.Date(2026, 10, 9, 9, 15, 0, 0, time.UTC)
 func TestShipper_SnapshotOverwritesHourlyAndLatest(t *testing.T) {
 	gcs := newFakeGCS(t)
 	path := filepath.Join(t.TempDir(), "diff-report.jsonl")
-	s := NewShipper(path, gcs.uploader(), 24, 5*time.Second)
+	s := NewShipper(path, "report", gcs.uploader(), 24, 5*time.Second)
 
 	writeFile(t, path, "{\"a\":1}\n")
-	s.handle(compare.SegmentEvent{Path: path, Size: 8, Start: t9})
+	s.handle(segment.Event{Path: path, Size: 8, Start: t9})
 	writeFile(t, path, "{\"a\":1}\n{\"b\":2}\npart")
-	s.handle(compare.SegmentEvent{Path: path, Size: 16, Start: t9})
+	s.handle(segment.Event{Path: path, Size: 16, Start: t9})
 
 	hourly := "p/2026100909/pod-a/diff-report.jsonl-20261009T091500Z.gz"
 	if got, _ := gcs.get(hourly); got != "{\"a\":1}\n{\"b\":2}\n" {
@@ -109,11 +108,11 @@ func TestShipper_SnapshotOverwritesHourlyAndLatest(t *testing.T) {
 func TestShipper_ClosedSegmentIsRemovedAfterUpload(t *testing.T) {
 	gcs := newFakeGCS(t)
 	path := filepath.Join(t.TempDir(), "diff-report.jsonl")
-	s := NewShipper(path, gcs.uploader(), 24, 5*time.Second)
+	s := NewShipper(path, "report", gcs.uploader(), 24, 5*time.Second)
 
 	seg := segment.Name(path, t9)
 	writeFile(t, seg, "{\"a\":1}\n")
-	s.handle(compare.SegmentEvent{Path: seg, Size: 8, Start: t9, Closed: true})
+	s.handle(segment.Event{Path: seg, Size: 8, Start: t9, Closed: true})
 
 	if got, ok := gcs.get("p/2026100909/pod-a/diff-report.jsonl-20261009T091500Z.gz"); !ok || got != "{\"a\":1}\n" {
 		t.Fatalf("hourly object = %q, %v", got, ok)
@@ -126,12 +125,12 @@ func TestShipper_ClosedSegmentIsRemovedAfterUpload(t *testing.T) {
 func TestShipper_FailedSegmentIsKeptAndRetried(t *testing.T) {
 	gcs := newFakeGCS(t)
 	path := filepath.Join(t.TempDir(), "diff-report.jsonl")
-	s := NewShipper(path, gcs.uploader(), 24, 5*time.Second)
+	s := NewShipper(path, "report", gcs.uploader(), 24, 5*time.Second)
 
 	first := segment.Name(path, t9)
 	writeFile(t, first, "{\"a\":1}\n")
 	gcs.fail.Store(true)
-	s.handle(compare.SegmentEvent{Path: first, Size: 8, Start: t9, Closed: true})
+	s.handle(segment.Event{Path: first, Size: 8, Start: t9, Closed: true})
 	if !exists(first) {
 		t.Fatal("a segment whose upload failed must stay on disk")
 	}
@@ -139,7 +138,7 @@ func TestShipper_FailedSegmentIsKeptAndRetried(t *testing.T) {
 	gcs.fail.Store(false)
 	second := segment.Name(path, t9.Add(time.Hour))
 	writeFile(t, second, "{\"b\":2}\n")
-	s.handle(compare.SegmentEvent{Path: second, Size: 8, Start: t9.Add(time.Hour), Closed: true})
+	s.handle(segment.Event{Path: second, Size: 8, Start: t9.Add(time.Hour), Closed: true})
 
 	if exists(first) || exists(second) {
 		t.Fatal("both segments should be uploaded and removed after recovery")
@@ -151,13 +150,13 @@ func TestShipper_FailedSegmentIsKeptAndRetried(t *testing.T) {
 
 func TestShipper_WithoutUploaderKeepsNewest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "diff-report.jsonl")
-	s := NewShipper(path, nil, 2, time.Second)
+	s := NewShipper(path, "report", nil, 2, time.Second)
 	var segs []string
 	for i := 0; i < 4; i++ {
 		seg := segment.Name(path, t9.Add(time.Duration(i)*time.Hour))
 		writeFile(t, seg, "x\n")
 		segs = append(segs, seg)
-		s.handle(compare.SegmentEvent{Path: seg, Size: 2, Start: t9, Closed: true})
+		s.handle(segment.Event{Path: seg, Size: 2, Start: t9, Closed: true})
 	}
 	got, _ := segment.List(path)
 	if len(got) != 2 || got[0] != segs[2] || got[1] != segs[3] {
@@ -171,7 +170,7 @@ func TestShipper_StartAndCloseShipLeftovers(t *testing.T) {
 	leftover := segment.Name(path, t9)
 	writeFile(t, leftover, "{\"old\":1}\n")
 
-	s := NewShipper(path, gcs.uploader(), 24, 5*time.Second)
+	s := NewShipper(path, "report", gcs.uploader(), 24, 5*time.Second)
 	s.Start() // ships segments left by a previous process
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -180,7 +179,7 @@ func TestShipper_StartAndCloseShipLeftovers(t *testing.T) {
 	gcs.fail.Store(true)
 	failed := segment.Name(path, t9.Add(time.Hour))
 	writeFile(t, failed, "{\"failed\":1}\n")
-	s.Notify(compare.SegmentEvent{Path: failed, Size: 13, Start: t9.Add(time.Hour), Closed: true})
+	s.Notify(segment.Event{Path: failed, Size: 13, Start: t9.Add(time.Hour), Closed: true})
 	for i := 0; i < 100 && len(s.events) > 0; i++ {
 		time.Sleep(10 * time.Millisecond)
 	}

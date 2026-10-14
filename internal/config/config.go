@@ -212,14 +212,40 @@ type LoggingConfig struct {
 	// (counted as logger_dropped). Default 10000.
 	QueueSize int            `yaml:"queue_size"`
 	Rotation  RotationConfig `yaml:"rotation"`
+	// Upload copies the query log to object storage every hour (and at
+	// shutdown), the same way as comparison.upload does the report.
+	// Needs rotation.interval "hourly".
+	Upload UploadConfig `yaml:"upload"`
 }
 
+// RotationConfig controls the rotation of the query log.
+//
+// Interval "size" (default) rotates by size through lumberjack:
+// MaxSizeMB, MaxAgeDays, MaxBackups and Compress apply.
+//
+// Interval "hourly" rotates at every UTC hour like the comparison report
+// (see ReportRotationConfig): the file is renamed to
+// <output_dir>/<file_prefix>.jsonl-<UTC start, YYYYMMDDTHHMMSSZ> unless
+// it is smaller than MinSizeKB or empty, at most Keep closed segments are
+// kept locally, and with upload.gcs every hour's data is uploaded and a
+// closed segment removed once uploaded. The size-based fields are
+// ignored.
 type RotationConfig struct {
-	MaxSizeMB  int  `yaml:"max_size_mb"`
-	MaxAgeDays int  `yaml:"max_age_days"`
-	MaxBackups int  `yaml:"max_backups"`
-	Compress   bool `yaml:"compress"`
+	Interval   string `yaml:"interval"`
+	MaxSizeMB  int    `yaml:"max_size_mb"`
+	MaxAgeDays int    `yaml:"max_age_days"`
+	MaxBackups int    `yaml:"max_backups"`
+	Compress   bool   `yaml:"compress"`
+	// MinSizeKB skips an hour's rotation while the file is smaller than
+	// this. 0 (default) rotates every non-empty hour. Hourly only.
+	MinSizeKB int `yaml:"min_size_kb"`
+	// Keep is the number of closed segments kept on local disk. Default
+	// 24. Hourly only.
+	Keep int `yaml:"keep"`
 }
+
+// RotateHourly reports whether the query log rotates every hour.
+func (r RotationConfig) RotateHourly() bool { return r.Interval == "hourly" }
 
 type ReplayConfig struct {
 	Mode    string        `yaml:"mode"` // "disabled", "shadow", "offline"
@@ -408,7 +434,7 @@ type ComparisonConfig struct {
 	// survives the process and its local disk (e.g. a pod's emptyDir):
 	// every hour with Rotation, otherwise when `serve` shuts down.
 	// Shadow mode only.
-	Upload ReportUploadConfig `yaml:"upload"`
+	Upload UploadConfig `yaml:"upload"`
 
 	// Rotation splits OutputFile into hourly segments in `serve`
 	// (shadow mode). See ReportRotationConfig.
@@ -440,10 +466,10 @@ type ReportRotationConfig struct {
 // RotateHourly reports whether the report rotates every hour.
 func (r ReportRotationConfig) RotateHourly() bool { return r.Interval == "hourly" }
 
-// ReportUploadConfig configures the upload of the comparison report
-// (hourly with rotation, at shutdown otherwise). Leaving gcs.bucket empty
-// disables it.
-type ReportUploadConfig struct {
+// UploadConfig configures the upload of the comparison report (hourly
+// with rotation, at shutdown otherwise) or of the hourly rotated query
+// log. Leaving gcs.bucket empty disables it.
+type UploadConfig struct {
 	GCS GCSUploadConfig `yaml:"gcs"`
 	// Timeout bounds each upload, and with rotation also the whole
 	// shutdown upload pass. Keep shutdown_timeout plus this below the
@@ -452,7 +478,7 @@ type ReportUploadConfig struct {
 	Timeout time.Duration `yaml:"timeout"`
 }
 
-// GCSUploadConfig names the destination of the report upload. Objects are
+// GCSUploadConfig names the destination of an upload. Objects are
 // written to gs://<bucket>/<prefix>/<YYYYMMDDHH>/<instance>/<file>-<UTC
 // timestamp>.gz, plus the uncompressed latest copy at
 // gs://<bucket>/latest/<prefix>/<instance>-<file>. Overwriting an object
@@ -552,6 +578,15 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Logging.QueueSize == 0 {
 		cfg.Logging.QueueSize = 10000
+	}
+	if cfg.Logging.Rotation.Interval == "" {
+		cfg.Logging.Rotation.Interval = "size"
+	}
+	if cfg.Logging.Rotation.Keep == 0 {
+		cfg.Logging.Rotation.Keep = 24
+	}
+	if cfg.Logging.Upload.Timeout == 0 {
+		cfg.Logging.Upload.Timeout = 20 * time.Second
 	}
 	if cfg.Replay.Mode == "" {
 		cfg.Replay.Mode = "disabled"
@@ -713,6 +748,28 @@ func (c *Config) Validate() error {
 	case "all", "error":
 	default:
 		return fmt.Errorf("logging.level must be one of: all, error (got %q)", c.Logging.Level)
+	}
+	switch c.Logging.Rotation.Interval {
+	case "size", "hourly":
+	default:
+		return fmt.Errorf("logging.rotation.interval must be one of: size, hourly (got %q)", c.Logging.Rotation.Interval)
+	}
+	if c.Logging.Rotation.MinSizeKB < 0 {
+		return fmt.Errorf("logging.rotation.min_size_kb must be non-negative, got %d", c.Logging.Rotation.MinSizeKB)
+	}
+	if c.Logging.Rotation.Keep < 1 {
+		return fmt.Errorf("logging.rotation.keep must be at least 1, got %d", c.Logging.Rotation.Keep)
+	}
+	if c.Logging.Upload.GCS.Bucket != "" {
+		if !c.Logging.Rotation.RotateHourly() {
+			return fmt.Errorf("logging.upload.gcs requires logging.rotation.interval: hourly")
+		}
+		if c.Logging.OutputDir == "" {
+			return fmt.Errorf("logging.upload.gcs requires logging.output_dir")
+		}
+		if c.Logging.Upload.Timeout < 0 {
+			return fmt.Errorf("logging.upload.timeout must be non-negative, got %v", c.Logging.Upload.Timeout)
+		}
 	}
 	if c.TLS.ClientSide.Enabled {
 		if c.TLS.ClientSide.CertFile == "" || c.TLS.ClientSide.KeyFile == "" {
