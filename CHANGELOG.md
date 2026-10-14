@@ -7,7 +7,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/) once it
 reaches 1.0 (everything before is 0.y.z with breaking changes possible between
 minor versions).
 
-## Unreleased
+<a id="v0.0.20"></a>
+## v0.0.20
+
+_Released 2026-10-14._
+
+The query log can rotate every hour and be uploaded to GCS the same way as
+the comparison report.
 
 ### Added
 
@@ -19,14 +25,16 @@ minor versions).
   data to `gs://<bucket>/<prefix>/<YYYYMMDDHH>/<instance>/<file>-<start>.gz`
   plus an uncompressed `latest/` copy, removing a closed segment locally
   once uploaded. The default stays `interval: size` (lumberjack), so
-  existing configs are unchanged.
+  existing configs are unchanged. `logging.upload.gcs` without
+  `interval: hourly` or `output_dir` fails at load. (#57)
 
 ### Changed
 
-- At shutdown the report and query log uploads run in parallel.
+- At shutdown the report and query log uploads run in parallel, so the
+  budget is `proxy.shutdown_timeout` plus the larger `upload.timeout`. (#57)
 - The rotation and upload code is shared between the report and the query
   log (`internal/segment`, `internal/upload`); the report's file names,
-  object names and log messages are unchanged.
+  object names and log messages are unchanged. (#57)
 
 <a id="v0.0.19"></a>
 ## v0.0.19
