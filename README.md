@@ -233,6 +233,36 @@ logging:
     compress: true
 ```
 
+**Hourly rotation and upload:** with `rotation.interval: hourly` the query
+log rotates and uploads exactly like the comparison report (see
+[Rotating and uploading the report](#rotating-and-uploading-the-report)):
+
+```yaml
+logging:
+  output_dir: "/var/log/mysql-interceptor"
+  file_prefix: "queries"
+  rotation:
+    interval: hourly      # default "size" rotates by max_size_mb via lumberjack
+    min_size_kb: 0        # skip an hour's rotation while the file is smaller
+    keep: 24              # closed segments kept on local disk
+  upload:
+    gcs:
+      bucket: "my-bucket"
+      prefix: "mysql-interceptor/my-cluster"
+      # instance: "${POD_NAME}"   # defaults to the hostname (the pod name)
+    timeout: 20s
+```
+
+Every UTC hour `queries.jsonl` becomes `queries.jsonl-<UTC start>` and, with
+`upload.gcs.bucket`, is uploaded gzipped to
+`gs://<bucket>/<prefix>/<YYYYMMDDHH>/<instance>/queries.jsonl-<start>.gz` and
+uncompressed to `gs://<bucket>/latest/<prefix>/<instance>-queries.jsonl`, then
+removed locally. The file names differ from the report's, so both can share a
+bucket and prefix. `max_size_mb`, `max_age_days`, `max_backups` and `compress`
+apply to `interval: size` only. At shutdown the report and query log uploads
+run in parallel, so the budget is `proxy.shutdown_timeout` plus the larger
+`upload.timeout`.
+
 **Level:** `level: "error"` (the default) records only entries whose backend
 execution returned an error, skipping everything else before it reaches
 the async write queue — keeps steady-state volume low while still

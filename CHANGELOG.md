@@ -7,6 +7,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/) once it
 reaches 1.0 (everything before is 0.y.z with breaking changes possible between
 minor versions).
 
+## Unreleased
+
+### Added
+
+- **Hourly rotation and GCS upload for the query log**
+  (`internal/logging/logger.go`, `internal/config/config.go`,
+  `cmd/mysql-interceptor/main.go`). `logging.rotation.interval: hourly`
+  rotates the query log at every UTC hour like the comparison report
+  (`min_size_kb`, `keep`), and `logging.upload.gcs` uploads each hour's
+  data to `gs://<bucket>/<prefix>/<YYYYMMDDHH>/<instance>/<file>-<start>.gz`
+  plus an uncompressed `latest/` copy, removing a closed segment locally
+  once uploaded. The default stays `interval: size` (lumberjack), so
+  existing configs are unchanged.
+
+### Changed
+
+- At shutdown the report and query log uploads run in parallel.
+- The rotation and upload code is shared between the report and the query
+  log (`internal/segment`, `internal/upload`); the report's file names,
+  object names and log messages are unchanged.
+
 <a id="v0.0.19"></a>
 ## v0.0.19
 

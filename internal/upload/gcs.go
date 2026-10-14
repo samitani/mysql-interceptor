@@ -1,6 +1,6 @@
-// Package upload copies files produced by the proxy (currently the
-// comparison report) to object storage so they outlive the process and
-// its local disk.
+// Package upload copies files produced by the proxy (the comparison
+// report and the query log) to object storage so they outlive the
+// process and its local disk.
 package upload
 
 import (
@@ -24,7 +24,7 @@ const defaultGCSEndpoint = "https://storage.googleapis.com"
 // gcsScope is the narrowest scope that allows creating objects.
 const gcsScope = "https://www.googleapis.com/auth/devstorage.read_write"
 
-// GCSUploader uploads report files to gs://Bucket/<Prefix>/<UTC hour>/<Instance>/<name>
+// GCSUploader uploads files to gs://Bucket/<Prefix>/<UTC hour>/<Instance>/<name>
 // (and, for the latest snapshot, gs://Bucket/latest/<Prefix>/<Instance>-<name>).
 type GCSUploader struct {
 	Bucket string
