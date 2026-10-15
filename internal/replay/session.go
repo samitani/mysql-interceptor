@@ -565,7 +565,7 @@ func (ss *ShadowSession) recordResult(sq ShadowQuery, res execResult, engine *co
 		// don't break the connection, so we keep the session alive
 		// for those (see isTransportError).
 		if transport {
-			slog.Info("shadow: transport error, tearing down session",
+			slog.Error("shadow: transport error, tearing down session",
 				"session_id", ss.sessionID, "err", res.err)
 			ss.conn.Close()
 			ss.connBroken = true
